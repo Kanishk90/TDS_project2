@@ -68,7 +68,7 @@ class AutomatedAnalysis:
             self.aiproxy_token = os.environ.get("AIPROXY_TOKEN")
             # For demonstration, we use a placeholder token if none is found.
             if not self.aiproxy_token:
-                self.aiproxy_token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIyZjIwMDEyNDhAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.OhgFKK1Gd7JLHiEgvdaaHGogRLrz34k8-v5g9a03emk"
+                self.aiproxy_token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIyZjEwMDAzODZAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.rQGFn7DUSyFldWvQraZqg3iLywJxlQtL5xpgMAM5hDw"
                 # In a real scenario, raise an error if token is not set.
                 # raise ValueError("AIPROXY_TOKEN environment variable must be set")
         
