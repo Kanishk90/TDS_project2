@@ -1,23 +1,3 @@
-# # /// script
-# # requires-python = ">=3.11"
-# # dependencies = [
-# #   "httpx",
-# #   "pandas",
-# #   "matplotlib",
-# # ]
-# # ///
-
-# # Rest of your script starts here
-# import pandas as pd
-# import matplotlib.pyplot as plt
-# import httpx
-
-# # Example code
-# def main(file_path):
-#     data = pd.read_csv(file_path)
-#     print(data.head())
-
-
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -26,7 +6,7 @@
 #   "matplotlib",
 #   "httpx",
 #   "openai",
-#   "seaborn",
+#   "scikit-learn"
 # ]
 # ///
 
@@ -39,9 +19,10 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 import httpx
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import traceback
 import shutil
+import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
@@ -84,11 +65,12 @@ class AutomatedAnalysis:
                 raise ValueError(f"Could not read the CSV file with any of the tried encodings")
             
             # Validate AI Proxy Token
-            # self.aiproxy_token = os.environ.get("AIPROXY_TOKEN")
-            self.aiproxy_token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIyZjIwMDExOTNAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.CEi7xBI23rsAvNmTw2lE236c0r3tpoXsQsUGhBBywuo"
+            self.aiproxy_token = os.environ.get("AIPROXY_TOKEN")
+            # For demonstration, we use a placeholder token if none is found.
             if not self.aiproxy_token:
-                logger.error("AIPROXY_TOKEN environment variable is not set")
-                raise ValueError("AIPROXY_TOKEN environment variable must be set")
+                self.aiproxy_token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjIyZjIwMDEyNDhAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.OhgFKK1Gd7JLHiEgvdaaHGogRLrz34k8-v5g9a03emk"
+                # In a real scenario, raise an error if token is not set.
+                # raise ValueError("AIPROXY_TOKEN environment variable must be set")
         
         except Exception as e:
             logger.error(f"Initialization error: {e}")
@@ -111,30 +93,42 @@ class AutomatedAnalysis:
             "descriptive_stats": {}
         }
         
-        # Convert descriptive stats to dictionary with string representation
+        # Convert descriptive stats to dictionary
         try:
-            desc_stats = self.df.describe()
-            for col, stats in desc_stats.to_dict().items():
-                analysis["descriptive_stats"][col] = {k: str(v) for k, v in stats.items()}
+            desc_stats = self.df.describe(include='all', datetime_is_numeric=True)
+            # Convert NaN to "" for safety
+            desc_stats = desc_stats.fillna("").astype(str)
+            analysis["descriptive_stats"] = desc_stats.to_dict()
         except Exception as e:
             logger.warning(f"Could not generate descriptive statistics: {e}")
         
-        # Try to find correlations if numeric columns exist
-        numeric_columns = self.df.select_dtypes(include=['float64', 'int64']).columns
+        # Correlation matrix for numeric columns
+        numeric_columns = self.df.select_dtypes(include=[np.number]).columns
         if len(numeric_columns) > 1:
             try:
                 correlation_matrix = self.df[numeric_columns].corr()
-                # Convert correlation matrix to dictionary with string representation
-                analysis["correlation_matrix"] = {
-                    str(col1): {str(col2): str(val) for col2, val in row.items()}
-                    for col1, row in correlation_matrix.to_dict().items()
-                }
+                analysis["correlation_matrix"] = correlation_matrix.round(4).to_dict()
             except Exception as e:
                 logger.warning(f"Could not generate correlation matrix: {e}")
         
+        # Outlier detection using IQR method for numeric columns
+        outlier_info = {}
+        for col in numeric_columns:
+            col_data = self.df[col].dropna()
+            if len(col_data) > 0:
+                Q1 = np.percentile(col_data, 25)
+                Q3 = np.percentile(col_data, 75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                outliers = col_data[(col_data < lower_bound) | (col_data > upper_bound)]
+                outlier_info[col] = len(outliers)
+        
+        analysis["outliers"] = outlier_info
+        
         return analysis
     
-    def _call_llm(self, messages: List[Dict[str, str]], functions: List[Dict] = None) -> str:
+    def _call_llm(self, messages: List[Dict[str, str]], functions: Optional[List[Dict]] = None) -> str:
         """
         Call the OpenAI-compatible LLM via AI Proxy.
         
@@ -142,43 +136,71 @@ class AutomatedAnalysis:
         :param functions: Optional list of function definitions
         :return: LLM response
         """
-        # Fallback narrative generation if LLM call fails
         def generate_fallback_narrative(analysis):
+            total_rows = analysis['basic_info']['total_rows']
+            total_columns = analysis['basic_info']['total_columns']
+            column_types = analysis['basic_info']['column_types']
+            missing_values = {k:v for k,v in analysis.get('missing_values', {}).items() if v > 0}
+            outliers = analysis.get('outliers', {})
+            corr_matrix = analysis.get('correlation_matrix', {})
             narrative = f"""
-            # Data Analysis Narrative
+# Data Analysis Narrative (Fallback)
 
-            ## Dataset Overview
+## Dataset Overview
+- **Total Rows**: {total_rows}
+- **Total Columns**: {total_columns}
 
-            - *Total Rows*: {analysis['basic_info']['total_rows']}
-            - *Total Columns*: {analysis['basic_info']['total_columns']}
+### Column Types
+"""
+            for col, ctype in column_types.items():
+                narrative += f"- {col}: {ctype}\n"
 
-            ## Column Types
-            {', '.join([f"{col}: {dtype}" for col, dtype in analysis['basic_info']['column_types'].items()])}
+            narrative += "\n### Missing Values\n"
+            if missing_values:
+                for col, val in missing_values.items():
+                    narrative += f"- {col}: {val} missing values\n"
+            else:
+                narrative += "- No missing values detected\n"
 
-            ## Missing Values
-            {', '.join([f"{col}: {count}" for col, count in analysis.get('missing_values', {}).items() if count > 0])}
+            narrative += "\n### Outliers\n"
+            if outliers:
+                outlier_reported = False
+                for col, count in outliers.items():
+                    if count > 0:
+                        narrative += f"- {col}: {count} potential outliers\n"
+                        outlier_reported = True
+                if not outlier_reported:
+                    narrative += "- No significant outliers detected\n"
+            else:
+                narrative += "- Outlier information not available\n"
 
-            ## Key Insights
+            narrative += "\n### Correlation Matrix\n"
+            if corr_matrix:
+                narrative += "A correlation matrix was computed for numeric variables. Higher absolute values indicate stronger relationships.\n\n"
+                narrative += "*(Due to fallback mode, detailed correlation insights are not provided. Consider reviewing the correlation_heatmap.png chart.)*\n"
+            else:
+                narrative += "Correlation analysis was not performed or not applicable.\n"
 
-            1. *Data Composition*
-            - The dataset contains {analysis['basic_info']['total_rows']} rows and {analysis['basic_info']['total_columns']} columns.
-            - Column types include: {', '.join(set(analysis['basic_info']['column_types'].values()))}
+           
+            narrative += """
+            
+## Observations and Recommendations
+- Without LLM-driven insights, this fallback narrative focuses on basic metrics and structural aspects of the dataset.
+- The presence (or absence) of missing values suggests potential data cleaning steps before any modeling or in-depth analysis.
+- Outliers may indicate exceptional cases, errors, or unique opportunities that warrant further investigation.
+- Correlation analysis can guide which variables relate strongly to each other, supporting feature selection or identifying potential explanatory variables.
 
-            2. *Data Quality*
-            - Missing values were detected in some columns, which may require further investigation.
+## Next Steps
+- **Data Quality Improvements**: Consider imputing or removing missing values to ensure cleaner input for models.
+- **Further Statistical Analysis**: Explore relationships between variables more thoroughly, potentially using statistical tests or more advanced modeling.
+- **Domain-Specific Interpretation**: Integrate domain knowledge to better understand what certain outliers, correlations, or clusters might signify.
+- **Additional Modeling**: Consider regression, classification, or forecasting methods (if applicable) to leverage the dataset for predictive insights.
+- **Iterative Refinement**: Re-run analyses after data cleaning, feature engineering, or dimensionality reduction to improve the reliability of insights.
 
-            3. *Potential Next Steps*
-            - Clean missing data
-            - Perform more detailed statistical analysis
-            - Consider feature engineering based on column types
-
-            ## Limitations of This Analysis
-            - Automated narrative generation encountered an issue
-            - A basic narrative has been generated as a fallback
-            """
+*(This is a fallback narrative, created without advanced LLM-driven analysis. For deeper insights, try enabling LLM integration or re-running with the LLM service available.)*
+"""
             return narrative
 
-        # Attempt to use AI Proxy
         try:
             headers = {
                 "Authorization": f"Bearer {self.aiproxy_token}",
@@ -187,11 +209,11 @@ class AutomatedAnalysis:
             
             payload = {
                 "model": "gpt-4o-mini",
-                "messages": messages,
-                **({"functions": functions} if functions else {})
+                "messages": messages
             }
+            if functions:
+                payload["functions"] = functions
             
-            # Try multiple endpoints
             endpoints = [
                 "http://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
             ]
@@ -208,7 +230,7 @@ class AutomatedAnalysis:
                         
                         response_json = response.json()
                         if 'choices' in response_json and response_json['choices']:
-                            return response_json['choices'][0]['message']['content']
+                            return response_json['choices'][0]['message'].get('content', '')
                 
                 except (httpx.HTTPStatusError, httpx.RequestError) as e:
                     logger.warning(f"Failed endpoint {endpoint}: {e}")
@@ -216,7 +238,7 @@ class AutomatedAnalysis:
             
             # If all endpoints fail, use fallback
             logger.error("All LLM endpoints failed")
-            return generate_fallback_narrative(self._generate_generic_analysis())
+            return generate_fallback_narrative(self.analysis)
         
         except Exception as e:
             logger.error(f"Unexpected error in LLM call: {e}")
@@ -224,7 +246,7 @@ class AutomatedAnalysis:
             
             # Use fallback narrative if possible
             try:
-                return generate_fallback_narrative(self._generate_generic_analysis())
+                return generate_fallback_narrative(self.analysis)
             except Exception:
                 return """
                 # Data Analysis Narrative
@@ -241,134 +263,118 @@ class AutomatedAnalysis:
         
         :param analysis: Dictionary containing analysis results
         """
+
+        # Set a theme and larger font sizes for better readability
+        sns.set_theme(style="whitegrid", font_scale=1.0)
+
+        # Missing Values Chart
         try:
-            plt.figure(figsize=(15, 10))
-            plt.subplots_adjust(hspace=0.4, wspace=0.4)
-            
-            # Visualization 1: Missing Values
-            plt.subplot(2, 2, 1)
             missing_values = pd.Series(analysis.get('missing_values', {}))
             missing_values = missing_values[missing_values > 0]
             
+            plt.figure(figsize=(8, 6))
             if not missing_values.empty:
-                missing_values.plot(kind='bar')
-                plt.title('Missing Values by Column')
-                plt.xlabel('Columns')
-                plt.ylabel('Number of Missing Values')
+                missing_values.plot(kind='bar', color='steelblue')
+                plt.title('Missing Values by Column', fontsize=14, fontweight='bold')
+                plt.xlabel('Columns', fontsize=12)
+                plt.ylabel('Count of Missing Values', fontsize=12)
                 plt.xticks(rotation=45, ha='right')
             else:
                 plt.text(0.5, 0.5, 'No Missing Values', 
                          horizontalalignment='center', 
-                         verticalalignment='center')
-                plt.title('Missing Values')
+                         verticalalignment='center',
+                         fontsize=14, fontweight='bold')
+                plt.title('Missing Values', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+            plt.savefig('missing_values.png', dpi=150)
+            plt.close()
             
-            # Visualization 2: Numeric Column Distribution
-            plt.subplot(2, 2, 2)
-            numeric_columns = [col for col, dtype in analysis['basic_info']['column_types'].items() 
-                               if 'float' in dtype.lower() or 'int' in dtype.lower()]
-            
-            if numeric_columns:
-                # Select the first numeric column for distribution
-                first_numeric_col = numeric_columns[0]
-                column_data = self.df[first_numeric_col]
-                
-                sns.histplot(column_data, kde=True)
-                plt.title(f'Distribution of {first_numeric_col}')
-                plt.xlabel(first_numeric_col)
-                plt.ylabel('Frequency')
-            else:
-                plt.text(0.5, 0.5, 'No Numeric Columns', 
-                         horizontalalignment='center', 
-                         verticalalignment='center')
-                plt.title('Column Distribution')
-            
-            # Visualization 3: Correlation Heatmap
-            plt.subplot(2, 2, (3, 4))
-            correlation_matrix = analysis.get('correlation_matrix', {})
-            
-            if correlation_matrix:
-                # Convert correlation matrix to DataFrame with numeric values
-                corr_df = pd.DataFrame({
-                    col1: {col2: float(val) for col2, val in row.items()}
-                    for col1, row in correlation_matrix.items()
-                })
-                
+        except Exception as e:
+            logger.error(f"Error creating missing values visualization: {e}")
+            logger.error(traceback.format_exc())
+        
+        # Distribution of first numeric column
+        numeric_columns = [col for col, dtype in analysis['basic_info']['column_types'].items() 
+                           if 'float' in dtype.lower() or 'int' in dtype.lower()]
+        
+        # Correlation Heatmap
+        correlation_matrix = analysis.get('correlation_matrix', {})
+        if correlation_matrix:
+            try:
+                corr_df = pd.DataFrame(correlation_matrix).astype(float)
                 plt.figure(figsize=(10, 8))
                 sns.heatmap(corr_df, annot=True, cmap='coolwarm', center=0, 
-                            square=True, linewidths=0.5, cbar_kws={"shrink": .8})
-                plt.title('Correlation Heatmap')
+                            square=True, linewidths=0.5, cbar_kws={"shrink": .8},
+                            annot_kws={"size":8})
+                plt.title('Correlation Heatmap', fontsize=14, fontweight='bold')
+                plt.xticks(rotation=45, ha='right', fontsize=10)
+                plt.yticks(rotation=0, fontsize=10)
                 plt.tight_layout()
-            else:
-                plt.text(0.5, 0.5, 'No Correlation Data', 
-                         horizontalalignment='center', 
-                         verticalalignment='center')
-                plt.title('Correlation Heatmap')
-            
-            # Save visualizations
-            plt.tight_layout()
-            plt.savefig('analysis_visualization.png', dpi=300, bbox_inches='tight')
-            plt.close('all')
-            
-            logger.info("Visualizations created successfully")
+                plt.savefig('correlation_heatmap.png', dpi=150)
+                plt.close()
+            except Exception as e:
+                logger.error(f"Error creating correlation heatmap: {e}")
+                logger.error(traceback.format_exc())
         
-        except Exception as e:
-            logger.error(f"Error creating visualizations: {e}")
-            logger.error(traceback.format_exc())
-            
-            # Fallback: Create a simple error visualization
-            plt.figure(figsize=(10, 6))
-            plt.text(0.5, 0.5, f'Visualization Error:\n{str(e)}', 
-                     horizontalalignment='center', 
-                     verticalalignment='center')
-            plt.title('Visualization Error')
-            plt.axis('off')
-            plt.savefig('analysis_visualization.png')
-            plt.close('all')
-    
+        # Boxplots for numeric columns to visualize outliers
+        if numeric_columns:
+            try:
+                plt.figure(figsize=(8, 6))
+                sns.boxplot(data=self.df[numeric_columns], orient='h', color='lightblue')
+                plt.title('Boxplot for Numeric Columns', fontsize=14, fontweight='bold')
+                plt.tight_layout()
+                plt.savefig('boxplots.png', dpi=150)
+                plt.close()
+            except Exception as e:
+                logger.error(f"Error creating boxplots: {e}")
+                logger.error(traceback.format_exc())
+        
+        
     def generate_narrative(self, analysis: Dict[str, Any]) -> str:
         """
-        Generate a narrative about the data analysis.
+        Generate a narrative about the data analysis using the LLM.
         
         :param analysis: Dictionary containing analysis results
         :return: Markdown narrative
         """
         try:
-            # Safely convert analysis to a string representation
-            def safe_str(obj):
-                try:
-                    return str(obj)
-                except Exception:
-                    return "Unable to convert to string"
+            # Prepare a brief summary of the data without sending all rows
+            basic_info = analysis.get('basic_info', {})
+            missing_values = {k: v for k,v in analysis.get('missing_values', {}).items() if v > 0}
             
-            # Prepare narrative prompt with safely converted data
+            # Provide more detail and context in the prompt to get a richer narrative
             prompt = f"""
-            Write a compelling narrative about this dataset analysis:
             
-            Dataset Overview:
-            - Total Rows: {safe_str(analysis['basic_info']['total_rows'])}
-            - Total Columns: {safe_str(analysis['basic_info']['total_columns'])}
-            - Column Types: {json.dumps(analysis['basic_info']['column_types'], indent=2)}
+            - Total Rows: {basic_info.get('total_rows')}
+            - Total Columns: {basic_info.get('total_columns')}
+            - Column Types: {json.dumps(basic_info.get('column_types'), indent=2)}
+            - Missing Values: {json.dumps(missing_values, indent=2)}
             
-            Missing Values Summary:
-            {json.dumps(analysis.get('missing_values', {}), indent=2)}
-            
-            Descriptive Statistics:
+            Descriptive Statistics (key metrics):
             {json.dumps(analysis.get('descriptive_stats', {}), indent=2)}
             
             Correlation Matrix (if available):
             {json.dumps(analysis.get('correlation_matrix', {}), indent=2)}
             
-            Please structure the narrative with:
-            1. Brief data description
-            2. Key insights from the analysis
-            3. Potential implications or recommendations
+            Outlier Counts by Numeric Column:
+            {json.dumps(analysis.get('outliers', {}), indent=2)}
+        
             
-            Use markdown formatting. Be creative and engaging!
+            Based on this information, write a compelling and comprehensive narrative about the dataset:
+            
+            - Begin by describing the nature and composition of the dataset.
+            - Discuss the presence of missing values.
+            - Highlight any notable insights from the descriptive statistics.
+            - Interpret the correlation matrix (if available): what does it suggest about relationships between numeric variables?
+            - Comment on the presence and distribution of outliers and what they might mean for further analysis or modeling.
+           
+            Use markdown formatting. Include headings, bullet points, and paragraphs for clarity.
+            Make the narrative informative, insightful, and engaging.
+            
+            At the end, provide a brief summary of what kind of actions or decisions someone might take based on these findings.
             """
             
-            # Call LLM with the prepared prompt
             narrative = self._call_llm([{"role": "user", "content": prompt}])
-            
             return narrative
         
         except Exception as e:
@@ -404,7 +410,7 @@ class AutomatedAnalysis:
         with open('README.md', 'w') as f:
             f.write(narrative)
         
-        print("Analysis complete. Check README.md and analysis_visualization.png")
+        print("Analysis complete. Check README.md and generated PNG files for charts.")
 
 def main():
     try:
@@ -439,11 +445,9 @@ def main():
             png_files = [f for f in os.listdir('.') if f.endswith('.png')]
             
             if os.path.exists(readme_path):
-                # If file already exists, overwrite it
                 shutil.move(readme_path, os.path.join(output_dir, readme_path))
             
             for png_file in png_files:
-                # If file already exists, overwrite it
                 shutil.move(png_file, os.path.join(output_dir, png_file))
             
             print(f"Analysis results saved in {output_dir} directory")
